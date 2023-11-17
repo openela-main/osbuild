@@ -1,0 +1,918 @@
+From c4d1d1c46449c00952a2df7472bd5a8adc9d93a7 Mon Sep 17 00:00:00 2001
+From: Achilleas Koutsou <achilleas@koutsou.net>
+Date: Wed, 1 Mar 2023 16:48:15 +0100
+Subject: [PATCH 1/9] inputs/containers: change archive format to dir
+
+The format so far was assumed to be `docker-archive` if the container
+was coming from a source and `oci-archive` if it was coming from a
+pipeline.  The source format will now be changed to `dir` instead of
+`docker-archive`.  The pipeline format remains `oci-archive`.
+
+With the new archive format being `dir`, the source can't be linked into
+the build root and is bind mounted instead with the use of a MountGuard
+created with the instance of the service, and torn down when the service
+is stopped.
+
+The _data field is removed from the map functions.  It was unused and
+these functions aren't part of the abstract class so they don't need to
+have consistent signatures.
+
+Update the skopeo stage with support for the newly supported `dir`
+format.
+---
+ inputs/org.osbuild.containers | 27 +++++++++++++++++++--------
+ stages/org.osbuild.skopeo     |  4 ++--
+ 2 files changed, 21 insertions(+), 10 deletions(-)
+
+diff --git a/inputs/org.osbuild.containers b/inputs/org.osbuild.containers
+index c50006c..d1e642e 100755
+--- a/inputs/org.osbuild.containers
++++ b/inputs/org.osbuild.containers
+@@ -21,6 +21,7 @@ import os
+ import sys
+ 
+ from osbuild import inputs
++from osbuild.util.mnt import MountGuard
+ 
+ SCHEMA = r"""
+ "definitions": {
+@@ -159,15 +160,22 @@ SCHEMA = r"""
+ 
+ class ContainersInput(inputs.InputService):
+ 
+-    @staticmethod
+-    def map_source_ref(source, ref, _data, target):
+-        cache_dir = os.path.join(source, ref)
+-        os.link(os.path.join(cache_dir, "container-image.tar"), os.path.join(target, ref))
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        self.mg = MountGuard()
++
++    def map_source_ref(self, source, ref, target):
++        source_archive = os.path.join(source, ref, "image")
++        dest = os.path.join(target, ref)
+ 
+-        return ref, "docker-archive"
++        # bind mount the input directory to the destination
++        os.makedirs(dest)
++        self.mg.mount(source_archive, dest)
++
++        return ref, "dir"
+ 
+     @staticmethod
+-    def map_pipeline_ref(store, ref, _data, target):
++    def map_pipeline_ref(store, ref, target):
+         # prepare the mount point
+         os.makedirs(target, exist_ok=True)
+         print("target", target)
+@@ -188,9 +196,9 @@ class ContainersInput(inputs.InputService):
+ 
+         for ref, data in refs.items():
+             if origin == "org.osbuild.source":
+-                ref, container_format = self.map_source_ref(source, ref, data, target)
++                ref, container_format = self.map_source_ref(source, ref, target)
+             else:
+-                ref, container_format = self.map_pipeline_ref(store, ref, data, target)
++                ref, container_format = self.map_pipeline_ref(store, ref, target)
+ 
+             images[ref] = {
+                 "format": container_format,
+@@ -206,6 +214,9 @@ class ContainersInput(inputs.InputService):
+         }
+         return reply
+ 
++    def unmap(self):
++        self.mg.umount()
++
+ 
+ def main():
+     service = ContainersInput.from_args(sys.argv[1:])
+diff --git a/stages/org.osbuild.skopeo b/stages/org.osbuild.skopeo
+index 0ed5e02..3323371 100755
+--- a/stages/org.osbuild.skopeo
++++ b/stages/org.osbuild.skopeo
+@@ -85,8 +85,8 @@ def main(inputs, output, options):
+             linkname = os.path.join(tmpdir, "image.tar")
+             os.symlink(source, linkname)
+ 
+-            if container_format == "docker-archive":
+-                source = f"docker-archive:{linkname}"
++            if container_format == "dir":
++                source = f"dir:{linkname}"
+             elif container_format == "oci-archive":
+                 source = f"oci-archive:{linkname}"
+             else:
+-- 
+2.40.0
+
+
+From b703c41a3d5203c16749b1bc1c96bdf2fad154c9 Mon Sep 17 00:00:00 2001
+From: Achilleas Koutsou <achilleas@koutsou.net>
+Date: Thu, 2 Mar 2023 13:44:50 +0100
+Subject: [PATCH 2/9] sources/skopeo: fix comment typo
+
+---
+ sources/org.osbuild.skopeo | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sources/org.osbuild.skopeo b/sources/org.osbuild.skopeo
+index 070a35f..bc343da 100755
+--- a/sources/org.osbuild.skopeo
++++ b/sources/org.osbuild.skopeo
+@@ -103,7 +103,7 @@ class SkopeoSource(sources.SourceService):
+                            check=True)
+ 
+             # Verify that the digest supplied downloaded the correct container image id.
+-            # The image id is the digest of the config, but skopeo can' currently
++            # The image id is the digest of the config, but skopeo can't currently
+             # get the config id, only the full config, so we checksum it ourselves.
+             res = subprocess.check_output(["skopeo", "inspect", "--raw", "--config", destination])
+             downloaded_id = "sha256:" + hashlib.sha256(res).hexdigest()
+-- 
+2.40.0
+
+
+From 321c7fd56d40f570a7f641d079d29d4f7c4c0fbf Mon Sep 17 00:00:00 2001
+From: Achilleas Koutsou <achilleas@koutsou.net>
+Date: Thu, 9 Mar 2023 14:41:53 +0100
+Subject: [PATCH 3/9] sources/skopeo: change local container format
+
+Change the local storage format for containers to the `dir` format.
+The `dir` format will be used to retain signatures and manifests.
+
+The remove-signatures option is removed since the storage format now
+supports them.
+
+The final move (os.rename()) at the end of the fetch_one() method now
+creates the checksum directory if it doesn't exist and moves the child
+archive into it, adding to any existing archives that might exist in
+other formats (from a previous version downloading a `docker-archive`).
+
+Dropped the .tar suffix from the symlink in the skopeo stage since it's
+not necessary and the target of the link might be a directory now.
+
+The parent class exists() method checks if there is a *file* in the
+sources cache that matches the checksum.  For containers, this used to
+be a file called container-image.tar under a directory that matches the
+checksum, so for containers it always returned False.  Added an override
+for the skopeo source that checks for the new directory archive.
+---
+ sources/org.osbuild.skopeo | 35 ++++++++++++++++++++++-------------
+ stages/org.osbuild.skopeo  |  2 +-
+ 2 files changed, 23 insertions(+), 14 deletions(-)
+
+diff --git a/sources/org.osbuild.skopeo b/sources/org.osbuild.skopeo
+index bc343da..acc20b0 100755
+--- a/sources/org.osbuild.skopeo
++++ b/sources/org.osbuild.skopeo
+@@ -1,6 +1,16 @@
+ #!/usr/bin/python3
+ """Fetch container image from a registry using skopeo
+ 
++The image is stored in a directory called `image` under a directory indexed by
++the "container image id", which is the digest of the container configuration
++file (rather than the outer manifest) and is what will be shown in the "podman
++images" output when the image is installed. This digest is stable as opposed to
++the manifest digest which can change during transfer and storage due to e.g.
++recompression.
++
++The local storage format for containers is the `dir` format which supports
++retaining signatures and manifests.
++
+ Buildhost commands used: `skopeo`.
+ """
+ 
+@@ -68,6 +78,8 @@ class SkopeoSource(sources.SourceService):
+ 
+     content_type = "org.osbuild.containers"
+ 
++    dir_name = "image"
++
+     def fetch_one(self, checksum, desc):
+         image_id = checksum
+         image = desc["image"]
+@@ -79,22 +91,14 @@ class SkopeoSource(sources.SourceService):
+             archive_dir = os.path.join(tmpdir, "container-archive")
+             os.makedirs(archive_dir)
+             os.chmod(archive_dir, 0o755)
+-            archive_path = os.path.join(archive_dir, "container-image.tar")
+ 
+             source = f"docker://{imagename}@{digest}"
+ 
+-            # We use the docker format, not oci, because that is the
+-            # default return image type of real world registries,
+-            # allowing the image to get the same image id as if you
+-            # did "podman pull" (rather than converting the image to
+-            # oci format, changing the id)
+-            destination = f"docker-archive:{archive_path}"
++            # We use the dir format because it is the most powerful in terms of feature support and is the closest to a
++            # direct serialisation of the registry data.
++            destination = f"dir:{archive_dir}/{self.dir_name}"
+ 
+             extra_args = []
+-
+-            # The archive format can't store signatures, but we still verify them during download
+-            extra_args.append("--remove-signatures")
+-
+             if not tls_verify:
+                 extra_args.append("--src-tls-verify=false")
+ 
+@@ -111,9 +115,14 @@ class SkopeoSource(sources.SourceService):
+                 raise RuntimeError(
+                     f"Downloaded image {imagename}@{digest} has a id of {downloaded_id}, but expected {image_id}")
+ 
+-            # Atomically move download dir into place on successful download
++            # Atomically move download archive into place on successful download
+             with ctx.suppress_oserror(errno.ENOTEMPTY, errno.EEXIST):
+-                os.rename(archive_dir, f"{self.cache}/{image_id}")
++                os.makedirs(os.path.join(self.cache, image_id), exist_ok=True)
++                os.rename(os.path.join(archive_dir, self.dir_name), os.path.join(self.cache, image_id, self.dir_name))
++
++    def exists(self, checksum, _desc):
++        path = os.path.join(self.cache, checksum, self.dir_name)
++        return os.path.exists(path)
+ 
+ 
+ def main():
+diff --git a/stages/org.osbuild.skopeo b/stages/org.osbuild.skopeo
+index 3323371..08c9292 100755
+--- a/stages/org.osbuild.skopeo
++++ b/stages/org.osbuild.skopeo
+@@ -82,7 +82,7 @@ def main(inputs, output, options):
+         # treats them special, like e.g. /some/path:tag, so we make a symlink to the real name
+         # and pass the symlink name to skopeo to make it work with anything
+         with tempfile.TemporaryDirectory() as tmpdir:
+-            linkname = os.path.join(tmpdir, "image.tar")
++            linkname = os.path.join(tmpdir, "image")
+             os.symlink(source, linkname)
+ 
+             if container_format == "dir":
+-- 
+2.40.0
+
+
+From 8d1b22d0a29637d1b661b0a8633ab457c4391c7d Mon Sep 17 00:00:00 2001
+From: Achilleas Koutsou <achilleas@koutsou.net>
+Date: Tue, 14 Mar 2023 17:25:23 +0100
+Subject: [PATCH 4/9] osbuild-mpp: extract is_manifest_list() function
+
+Extract the is_manifest_list() function from the ImageManifest object in
+osbuild-mpp into a util function to be reused by the skopeo source.
+---
+ osbuild/util/containers.py | 14 ++++++++++++++
+ tools/osbuild-mpp          |  9 ++-------
+ 2 files changed, 16 insertions(+), 7 deletions(-)
+ create mode 100644 osbuild/util/containers.py
+
+diff --git a/osbuild/util/containers.py b/osbuild/util/containers.py
+new file mode 100644
+index 0000000..65b5d05
+--- /dev/null
++++ b/osbuild/util/containers.py
+@@ -0,0 +1,14 @@
++def is_manifest_list(data):
++    """Inspect a manifest determine if it's a multi-image manifest-list."""
++    media_type = data.get("mediaType")
++    #  Check if mediaType is set according to docker or oci specifications
++    if media_type in ("application/vnd.docker.distribution.manifest.list.v2+json",
++                      "application/vnd.oci.image.index.v1+json"):
++        return True
++
++    # According to the OCI spec, setting mediaType is not mandatory. So, if it is not set at all, check for the
++    # existence of manifests
++    if media_type is None and data.get("manifests") is not None:
++        return True
++
++    return False
+diff --git a/tools/osbuild-mpp b/tools/osbuild-mpp
+index b8619f4..2f44dd6 100755
+--- a/tools/osbuild-mpp
++++ b/tools/osbuild-mpp
+@@ -322,6 +322,7 @@ import hawkey
+ import rpm
+ import yaml
+ 
++from osbuild.util import containers
+ from osbuild.util.rhsm import Subscriptions
+ 
+ # We need to resolve an image name to a resolved image manifest digest
+@@ -407,13 +408,7 @@ class ImageManifest:
+         self.digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+ 
+     def is_manifest_list(self):
+-        #  Check if mediaType is set according to docker or oci specifications
+-        if self.media_type in ("application/vnd.docker.distribution.manifest.list.v2+json", "application/vnd.oci.image.index.v1+json"):
+-            return True
+-        # According to the OCI spec, setting mediaType is not mandatory. So, if it is not set at all, check for the existance of manifests
+-        if self.media_type == "" and self.json.get("manifests") is not None:
+-            return True
+-        return False
++        return containers.is_manifest_list(self.json)
+ 
+     def _match_platform(self, wanted_arch, wanted_os, wanted_variant):
+         for m in self.json.get("manifests", []):
+-- 
+2.40.0
+
+
+From b5bada59383c6b275077309924ec086c0f1c467e Mon Sep 17 00:00:00 2001
+From: Achilleas Koutsou <achilleas@koutsou.net>
+Date: Thu, 16 Mar 2023 13:43:06 +0100
+Subject: [PATCH 5/9] sources: add org.osbuild.skopeo-index source
+
+A new source module that can download a multi-image manifest list from a
+container registry.  This module is very similar to the skopeo source,
+but instead downloads a manifest list with `--multi-arch=index-only`.
+The checksum of the source object must be the digest of the manifest
+list that will be stored and the manifest that is downloaded must be a
+manifest-list.
+---
+ sources/org.osbuild.skopeo-index | 117 +++++++++++++++++++++++++++++++
+ 1 file changed, 117 insertions(+)
+ create mode 100755 sources/org.osbuild.skopeo-index
+
+diff --git a/sources/org.osbuild.skopeo-index b/sources/org.osbuild.skopeo-index
+new file mode 100755
+index 0000000..9d608f9
+--- /dev/null
++++ b/sources/org.osbuild.skopeo-index
+@@ -0,0 +1,117 @@
++#!/usr/bin/python3
++"""Fetch container manifest list from a registry using skopeo
++
++The manifest is stored as a single file indexed by its content hash.
++
++Buildhost commands used: `skopeo`.
++"""
++
++import errno
++import json
++import os
++import subprocess
++import sys
++import tempfile
++
++from osbuild import sources
++from osbuild.util import containers, ctx
++
++SCHEMA = """
++"additionalProperties": false,
++"definitions": {
++  "item": {
++    "description": "The manifest list to fetch",
++    "type": "object",
++    "additionalProperties": false,
++    "patternProperties": {
++      "sha256:[0-9a-f]{64}": {
++        "type": "object",
++        "additionalProperties": false,
++        "required": ["image"],
++        "properties": {
++          "image": {
++            "type": "object",
++            "additionalProperties": false,
++            "required": ["name"],
++            "properties": {
++              "name": {
++                "type": "string",
++                "description": "Name of the image (including registry)."
++              },
++              "tls-verify": {
++                "type": "boolean",
++                "description": "Require https (default true)."
++              }
++            }
++          }
++        }
++      }
++    }
++  }
++},
++"properties": {
++  "items": {"$ref": "#/definitions/item"},
++  "digests": {"$ref": "#/definitions/item"}
++},
++"oneOf": [{
++  "required": ["items"]
++}, {
++  "required": ["digests"]
++}]
++"""
++
++
++class SkopeoIndexSource(sources.SourceService):
++
++    content_type = "org.osbuild.files"
++
++    def fetch_one(self, checksum, desc):
++        digest = checksum
++        image = desc["image"]
++        imagename = image["name"]
++        tls_verify = image.get("tls-verify", True)
++
++        with tempfile.TemporaryDirectory(prefix="tmp-download-", dir=self.cache) as tmpdir:
++            archive_dir = os.path.join(tmpdir, "index")
++            os.makedirs(archive_dir)
++            os.chmod(archive_dir, 0o755)
++
++            source = f"docker://{imagename}@{digest}"
++
++            destination = f"dir:{archive_dir}"
++
++            extra_args = []
++            if not tls_verify:
++                extra_args.append("--src-tls-verify=false")
++
++            subprocess.run(["skopeo", "copy", "--multi-arch=index-only", *extra_args, source, destination],
++                           encoding="utf-8", check=True)
++
++            # Verify that the digest supplied downloaded a manifest-list.
++            res = subprocess.check_output(["skopeo", "inspect", "--raw", destination])
++            if not containers.is_manifest_list(json.loads(res)):
++                raise RuntimeError(
++                    f"{imagename}@{digest} is not a manifest-list")
++
++            # use skopeo to calculate the checksum instead of our verify utility to make sure it's computed properly for
++            # all types of manifests and handles any potential future changes to the way it's calculated
++            manifest_path = os.path.join(archive_dir, "manifest.json")
++            dl_checksum = subprocess.check_output(["skopeo", "manifest-digest", manifest_path]).decode().strip()
++            if dl_checksum != checksum:
++                raise RuntimeError(
++                    f"Downloaded manifest-list {imagename}@{digest} has a checksum of {dl_checksum}, "
++                    f"but expected {checksum}"
++                )
++
++            # Move manifest into place on successful download
++            with ctx.suppress_oserror(errno.ENOTEMPTY, errno.EEXIST):
++                os.rename(f"{archive_dir}/manifest.json", f"{self.cache}/{digest}")
++
++
++def main():
++    service = SkopeoIndexSource.from_args(sys.argv[1:])
++    service.main()
++
++
++if __name__ == '__main__':
++    main()
+-- 
+2.40.0
+
+
+From 5aabd8ac9a74e3f33fb34ae25c586b4bd7aabfd9 Mon Sep 17 00:00:00 2001
+From: Achilleas Koutsou <achilleas@koutsou.net>
+Date: Thu, 16 Mar 2023 15:23:20 +0100
+Subject: [PATCH 6/9] stages/skopeo: add manifest-lists input
+
+Add an extra optional input type to the skopeo stage called
+`manifest-lists`.  This is a list of file-type inputs that must be a
+list of manifest lists, downloaded by the skopeo-index source.
+
+The manifests are parsed and automatically associated with an image from
+the required `images` inputs.  If any manifest list is specified and not
+used, this is an error.
+
+Adding manifest-lists currently has no effect.
+---
+ stages/org.osbuild.skopeo | 70 +++++++++++++++++++++++++++++++++++----
+ 1 file changed, 64 insertions(+), 6 deletions(-)
+
+diff --git a/stages/org.osbuild.skopeo b/stages/org.osbuild.skopeo
+index 08c9292..a26fa11 100755
+--- a/stages/org.osbuild.skopeo
++++ b/stages/org.osbuild.skopeo
+@@ -7,6 +7,7 @@ input (reading from a skopeo source or a file in a pipeline).
+ Buildhost commands used: `skopeo`.
+ """
+ 
++import json
+ import os
+ import subprocess
+ import sys
+@@ -23,6 +24,11 @@ SCHEMA_2 = r"""
+     "images": {
+       "type": "object",
+       "additionalProperties": true
++    },
++    "manifest-lists": {
++      "type": "object",
++      "description": "Optional manifest lists to merge into images. The metadata must specify an image ID to merge to.",
++      "additionalProperties": true
+     }
+   }
+ },
+@@ -53,20 +59,70 @@ SCHEMA_2 = r"""
+ """
+ 
+ 
++def parse_manifest_list(manifests):
++    """Return a map with single-image manifest digests as keys and the manifest-list digest as the value for each"""
++    manifest_files = manifests["data"]["files"]
++    manifest_map = {}
++    for fname in manifest_files:
++        filepath = os.path.join(manifests["path"], fname)
++        with open(filepath, mode="r", encoding="utf-8") as mfile:
++            data = json.load(mfile)
++
++        for manifest in data["manifests"]:
++            digest = manifest["digest"]  # single image manifest digest
++            manifest_map[digest] = fname
++
++    return manifest_map
++
++
++def manifest_digest(path):
++    """Get the manifest digest for a container at path, stored in dir: format"""
++    return subprocess.check_output(["skopeo", "manifest-digest", os.path.join(path, "manifest.json")]).decode().strip()
++
++
+ def parse_input(inputs):
++    manifests = inputs.get("manifest-lists")
++    manifest_map = {}
++    manifest_files = {}
++    if manifests:
++        manifest_files = manifests["data"]["files"]
++        # reverse map manifest-digest -> manifest-list path
++        manifest_map = parse_manifest_list(manifests)
++
+     images = inputs["images"]
+     archives = images["data"]["archives"]
+ 
+-    res = []
+-    for filename, data in archives.items():
+-        filepath = os.path.join(images["path"], filename)
++    res = {}
++    for checksum, data in archives.items():
++        filepath = os.path.join(images["path"], checksum)
++        list_path = None
++        if data["format"] == "dir":
++            digest = manifest_digest(filepath)
++
++            # get the manifest list path for this image
++            list_digest = manifest_map.get(digest)
++            if list_digest:
++                # make sure all manifest files are used
++                del manifest_files[list_digest]
++                list_path = os.path.join(manifests["path"], list_digest)
++
++        res[checksum] = {
++            "filepath": filepath,
++            "manifest-list": list_path,
++            "data": data,
++        }
++
++    if manifest_files:
++        raise RuntimeError(
++            "The following manifest lists specified in the input did not match any of the container images: " +
++            ", ".join(manifest_files)
++        )
+ 
+-        res.append((filepath, data))
+     return res
+ 
+ 
+ def main(inputs, output, options):
+-    files = parse_input(inputs)
++    images = parse_input(inputs)
+ 
+     destination = options["destination"]
+     # The destination type is always containers-storage atm, so ignore "type"
+@@ -74,7 +130,9 @@ def main(inputs, output, options):
+     storage_root = destination.get("storage-path", "/var/lib/containers/storage")
+     storage_driver = destination.get("storage-driver", "overlay")
+ 
+-    for source, source_data in files:
++    for image in images.values():
++        source = image["filepath"]
++        source_data = image["data"]
+         container_format = source_data["format"]
+         image_name = source_data["name"]
+ 
+-- 
+2.40.0
+
+
+From 4e59d3a383e6cd54c92dd5e2c738df840e026b3f Mon Sep 17 00:00:00 2001
+From: Achilleas Koutsou <achilleas@koutsou.net>
+Date: Thu, 16 Mar 2023 15:50:41 +0100
+Subject: [PATCH 7/9] stages/skopeo: merge manifest into image directory
+
+When a manifest list is matched with a container image, the skopeo
+stage will merge the specified manifest into the container image dir
+before copying it to the registry in the OS tree.
+
+If there is no manifest to merge, we maintain the old behaviour of
+symlinking the source to work around the ":" in filename issue.
+Otherwise, we copy the container directory so that we can merge the
+manifest in the new location.
+---
+ stages/org.osbuild.skopeo | 46 +++++++++++++++++++++++++++++----------
+ 1 file changed, 34 insertions(+), 12 deletions(-)
+
+diff --git a/stages/org.osbuild.skopeo b/stages/org.osbuild.skopeo
+index a26fa11..6454ea7 100755
+--- a/stages/org.osbuild.skopeo
++++ b/stages/org.osbuild.skopeo
+@@ -121,6 +121,27 @@ def parse_input(inputs):
+     return res
+ 
+ 
++def merge_manifest(list_manifest, destination):
++    """
++    Merge the list manifest into the image directory. This preserves the manifest list with the image in the registry so
++    that users can run or inspect a container using the original manifest list digest used to pull the container.
++
++    See https://github.com/containers/skopeo/issues/1935
++    """
++    # calculate the checksum of the manifest of the container image in the destination
++    dest_manifest = os.path.join(destination, "manifest.json")
++    manifest_checksum = subprocess.check_output(["skopeo", "manifest-digest", dest_manifest]).decode().strip()
++    parts = manifest_checksum.split(":")
++    assert len(parts) == 2, f"unexpected output for skopeo manifest-digest: {manifest_checksum}"
++    manifest_checksum = parts[1]
++
++    # rename the manifest to its checksum
++    os.rename(dest_manifest, os.path.join(destination, manifest_checksum + ".manifest.json"))
++
++    # copy the index manifest into the destination
++    subprocess.run(["cp", "--reflink=auto", "-a", list_manifest, dest_manifest], check=True)
++
++
+ def main(inputs, output, options):
+     images = parse_input(inputs)
+ 
+@@ -136,24 +157,25 @@ def main(inputs, output, options):
+         container_format = source_data["format"]
+         image_name = source_data["name"]
+ 
+-        # We can't have special characters like ":" in the source names because containers/image
+-        # treats them special, like e.g. /some/path:tag, so we make a symlink to the real name
+-        # and pass the symlink name to skopeo to make it work with anything
+         with tempfile.TemporaryDirectory() as tmpdir:
+-            linkname = os.path.join(tmpdir, "image")
+-            os.symlink(source, linkname)
++            tmp_source = os.path.join(tmpdir, "image")
+ 
+-            if container_format == "dir":
+-                source = f"dir:{linkname}"
+-            elif container_format == "oci-archive":
+-                source = f"oci-archive:{linkname}"
++            if container_format == "dir" and image["manifest-list"]:
++                # copy the source container to the tmp source so we can merge the manifest into it
++                subprocess.run(["cp", "-a", "--reflink=auto", source, tmp_source], check=True)
++                merge_manifest(image["manifest-list"], tmp_source)
+             else:
++                # We can't have special characters like ":" in the source names because containers/image
++                # treats them special, like e.g. /some/path:tag, so we make a symlink to the real name
++                # and pass the symlink name to skopeo to make it work with anything
++                os.symlink(source, tmp_source)
++
++            if container_format not in ("dir", "oci-archive"):
+                 raise RuntimeError(f"Unknown container format {container_format}")
+ 
++            source = f"{container_format}:{tmp_source}"
+             dest = f"containers-storage:[{storage_driver}@{output}{storage_root}+/run/containers/storage]{image_name}"
+-
+-            subprocess.run(["skopeo", "copy", source, dest],
+-                           check=True)
++            subprocess.run(["skopeo", "copy", source, dest], check=True)
+ 
+     if storage_driver == "overlay":
+         # Each time the overlay backend runs on an xfs fs it creates this file:
+-- 
+2.40.0
+
+
+From 5096c6e11f060eb8f550544db7ce6960c5601a43 Mon Sep 17 00:00:00 2001
+From: Achilleas Koutsou <achilleas@koutsou.net>
+Date: Mon, 27 Mar 2023 18:14:50 +0200
+Subject: [PATCH 8/9] tools/osbuild-mpp: resolve manifest lists
+
+Add support for resolving manifest lists in osbuild-mpp.
+Adds an `index` boolean field to the container image struct for
+mpp-resolve-images.  When enabled, the preprocessor will also store the
+manifest-list digest as a separate skopeo-index source and add it to the
+skopeo stage under the `manifest-lists` input.
+---
+ tools/osbuild-mpp | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/tools/osbuild-mpp b/tools/osbuild-mpp
+index 2f44dd6..8ac8634 100755
+--- a/tools/osbuild-mpp
++++ b/tools/osbuild-mpp
+@@ -1495,12 +1495,14 @@ class ManifestFileV2(ManifestFile):
+             return
+ 
+         refs = element_enter(inputs_images, "references", {})
++        manifest_lists = []
+ 
+         for image in element_enter(mpp, "images", []):
+             source = image["source"]
+             name = image.get("name", source)
+             digest = image.get("digest", None)
+             tag = image.get("tag", None)
++            index = image.get("index", False)
+ 
+             main_manifest = ImageManifest.load(source, tag=tag, digest=digest)
+ 
+@@ -1529,6 +1531,23 @@ class ManifestFileV2(ManifestFile):
+                 "name": name
+             }
+ 
++            if index:
++                manifest_lists.append(main_manifest.digest)
++                container_index_source = element_enter(self.sources, "org.osbuild.skopeo-index", {})
++                index_items = element_enter(container_index_source, "items", {})
++                index_items[main_manifest.digest] = {
++                    "image": {
++                        "name": source
++                    }
++                }
++
++        # if we collected manifest lists, create the manifest-lists input array for the stage
++        if manifest_lists:
++            inputs_manifests = element_enter(inputs, "manifest-lists", {})
++            inputs_manifests["type"] = "org.osbuild.files"
++            inputs_manifests["origin"] = "org.osbuild.source"
++            inputs_manifests["references"] = manifest_lists
++
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Manifest pre processor")
+-- 
+2.40.0
+
+
+From 4832a08422b9d8d022937fb9b6fc0ca43d395543 Mon Sep 17 00:00:00 2001
+From: Achilleas Koutsou <achilleas@koutsou.net>
+Date: Mon, 27 Mar 2023 17:33:31 +0200
+Subject: [PATCH 9/9] test: add manifest-list test for skopeo stage
+
+Added another skopeo stage to skopeo/a.mpp.json with a skopeo source for
+a container hosted on the osbuild-composer gitlab registry.  The name
+points to a manifest list, which refers to two containers (amd64 and
+arm64) that contain a single text file (README.md).  The `index` field
+is enabled to include the manifest-list as an extra input to the stage.
+
+The diff is updated with the new expected file list.
+The containers were created with buildah:
+
+  amd=$(buildah from --arch=amd64 scratch)
+  arm=$(buildah from --arch=arm64 scratch)
+  buildah config --created-by "Achilleas Koutsou" "${amd}"
+  buildah config --created-by "Achilleas Koutsou" "${arm}"
+  buildah copy "${amd}" README.md
+  buildah copy "${arm}" README.md
+  amdid=$(buildah commit --format=docker --rm "${amd}")
+  armid=$(buildah commit --format=docker --rm "${arm}")
+  name="registry.gitlab.com/redhat/services/products/image-builder/ci/osbuild-composer/manifest-list-test"
+  buildah manifest create "${name}" "${amdid}" "${armid}"
+
+  podman manifest push --all "${name}" dir:container
+---
+ test/data/stages/skopeo/a.json     | 46 ++++++++++++++++++++++++++++++
+ test/data/stages/skopeo/a.mpp.json | 24 ++++++++++++++++
+ test/data/stages/skopeo/diff.json  | 18 +++++++++---
+ 3 files changed, 84 insertions(+), 4 deletions(-)
+
+diff --git a/test/data/stages/skopeo/a.json b/test/data/stages/skopeo/a.json
+index 7c31e18..b29c318 100644
+--- a/test/data/stages/skopeo/a.json
++++ b/test/data/stages/skopeo/a.json
+@@ -401,6 +401,33 @@
+               "storage-driver": "vfs"
+             }
+           }
++        },
++        {
++          "type": "org.osbuild.skopeo",
++          "inputs": {
++            "images": {
++              "type": "org.osbuild.containers",
++              "origin": "org.osbuild.source",
++              "references": {
++                "sha256:dbb63178dc9157068107961f11397df3fb62c02fa64f697d571bf84aad71cb99": {
++                  "name": "manifest-list-test"
++                }
++              }
++            },
++            "manifest-lists": {
++              "type": "org.osbuild.files",
++              "origin": "org.osbuild.source",
++              "references": [
++                "sha256:58150862447d05feeb263ddb7257bf11d2ce2a697362ac117de2184d10f028fc"
++              ]
++            }
++          },
++          "options": {
++            "destination": {
++              "type": "containers-storage",
++              "storage-driver": "vfs"
++            }
++          }
+         }
+       ]
+     }
+@@ -733,6 +760,25 @@
+           "data": "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AAAAAAAAAAAAAAAAAAAAAABhbGV4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAwMDAwMDAAMDAwMDAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHsiaW1hZ2VMYXlvdXRWZXJzaW9uIjogIjEuMC4wIn0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+         }
+       }
++    },
++    "org.osbuild.skopeo": {
++      "items": {
++        "sha256:dbb63178dc9157068107961f11397df3fb62c02fa64f697d571bf84aad71cb99": {
++          "image": {
++            "name": "registry.gitlab.com/redhat/services/products/image-builder/ci/osbuild-composer/manifest-list-test",
++            "digest": "sha256:601c98c8148720ec5c29b8e854a1d5d88faddbc443eca12920d76cf993d7290e"
++          }
++        }
++      }
++    },
++    "org.osbuild.skopeo-index": {
++      "items": {
++        "sha256:58150862447d05feeb263ddb7257bf11d2ce2a697362ac117de2184d10f028fc": {
++          "image": {
++            "name": "registry.gitlab.com/redhat/services/products/image-builder/ci/osbuild-composer/manifest-list-test"
++          }
++        }
++      }
+     }
+   }
+ }
+diff --git a/test/data/stages/skopeo/a.mpp.json b/test/data/stages/skopeo/a.mpp.json
+index 25886ad..9dd3f0b 100644
+--- a/test/data/stages/skopeo/a.mpp.json
++++ b/test/data/stages/skopeo/a.mpp.json
+@@ -60,6 +60,30 @@
+               "storage-driver": "vfs"
+             }
+           }
++        },
++        {
++          "type": "org.osbuild.skopeo",
++          "inputs": {
++            "images": {
++              "type": "org.osbuild.containers",
++              "origin": "org.osbuild.source",
++              "mpp-resolve-images": {
++                "images": [
++                  {
++                    "source": "registry.gitlab.com/redhat/services/products/image-builder/ci/osbuild-composer/manifest-list-test",
++                    "name": "manifest-list-test",
++                    "index": true
++                  }
++                ]
++              }
++            }
++          },
++          "options": {
++            "destination": {
++              "type": "containers-storage",
++              "storage-driver": "vfs"
++            }
++          }
+         }
+       ]
+     }
+diff --git a/test/data/stages/skopeo/diff.json b/test/data/stages/skopeo/diff.json
+index f3cfe01..2118db3 100644
+--- a/test/data/stages/skopeo/diff.json
++++ b/test/data/stages/skopeo/diff.json
+@@ -12,20 +12,30 @@
+     "/var/lib/containers/storage/vfs",
+     "/var/lib/containers/storage/vfs-containers",
+     "/var/lib/containers/storage/vfs-containers/containers.lock",
++    "/var/lib/containers/storage/vfs/dir",
++    "/var/lib/containers/storage/vfs/dir/0da97f9fb353a8d6285145bc7a1b75a28652e80f60ab7479bf5b4ae67ffa37e8",
++    "/var/lib/containers/storage/vfs/dir/0da97f9fb353a8d6285145bc7a1b75a28652e80f60ab7479bf5b4ae67ffa37e8/hello.txt",
++    "/var/lib/containers/storage/vfs/dir/8c42be08e0e5abaacad063054dccf9ce176453c50f14aebc5b335077c79cef77",
++    "/var/lib/containers/storage/vfs/dir/8c42be08e0e5abaacad063054dccf9ce176453c50f14aebc5b335077c79cef77/README.md",
+     "/var/lib/containers/storage/vfs-images",
+     "/var/lib/containers/storage/vfs-images/805e972fbc4dfa74a616dcaafe0d9e9b4c548b8909b14ffb032aa20fa23d9ad6",
+     "/var/lib/containers/storage/vfs-images/805e972fbc4dfa74a616dcaafe0d9e9b4c548b8909b14ffb032aa20fa23d9ad6/=bWFuaWZlc3Qtc2hhMjU2OjIxY2E2OGE2OWJiNTlhZDFhY2M5NzgwN2M2NDMyZmFjODJlMGVlNjk5YWJkODgyNmZjZTdlZDdhOWY0OTc3NjE=",
+     "/var/lib/containers/storage/vfs-images/805e972fbc4dfa74a616dcaafe0d9e9b4c548b8909b14ffb032aa20fa23d9ad6/=c2hhMjU2OjgwNWU5NzJmYmM0ZGZhNzRhNjE2ZGNhYWZlMGQ5ZTliNGM1NDhiODkwOWIxNGZmYjAzMmFhMjBmYTIzZDlhZDY=",
+     "/var/lib/containers/storage/vfs-images/805e972fbc4dfa74a616dcaafe0d9e9b4c548b8909b14ffb032aa20fa23d9ad6/=c2lnbmF0dXJlLTIxY2E2OGE2OWJiNTlhZDFhY2M5NzgwN2M2NDMyZmFjODJlMGVlNjk5YWJkODgyNmZjZTdlZDdhOWY0OTc3NjE=",
+     "/var/lib/containers/storage/vfs-images/805e972fbc4dfa74a616dcaafe0d9e9b4c548b8909b14ffb032aa20fa23d9ad6/manifest",
++    "/var/lib/containers/storage/vfs-images/dbb63178dc9157068107961f11397df3fb62c02fa64f697d571bf84aad71cb99",
++    "/var/lib/containers/storage/vfs-images/dbb63178dc9157068107961f11397df3fb62c02fa64f697d571bf84aad71cb99/=bWFuaWZlc3Qtc2hhMjU2OjU4MTUwODYyNDQ3ZDA1ZmVlYjI2M2RkYjcyNTdiZjExZDJjZTJhNjk3MzYyYWMxMTdkZTIxODRkMTBmMDI4ZmM=",
++    "/var/lib/containers/storage/vfs-images/dbb63178dc9157068107961f11397df3fb62c02fa64f697d571bf84aad71cb99/=bWFuaWZlc3Qtc2hhMjU2OjYwMWM5OGM4MTQ4NzIwZWM1YzI5YjhlODU0YTFkNWQ4OGZhZGRiYzQ0M2VjYTEyOTIwZDc2Y2Y5OTNkNzI5MGU=",
++    "/var/lib/containers/storage/vfs-images/dbb63178dc9157068107961f11397df3fb62c02fa64f697d571bf84aad71cb99/=c2hhMjU2OmRiYjYzMTc4ZGM5MTU3MDY4MTA3OTYxZjExMzk3ZGYzZmI2MmMwMmZhNjRmNjk3ZDU3MWJmODRhYWQ3MWNiOTk=",
++    "/var/lib/containers/storage/vfs-images/dbb63178dc9157068107961f11397df3fb62c02fa64f697d571bf84aad71cb99/=c2lnbmF0dXJlLTYwMWM5OGM4MTQ4NzIwZWM1YzI5YjhlODU0YTFkNWQ4OGZhZGRiYzQ0M2VjYTEyOTIwZDc2Y2Y5OTNkNzI5MGU=",
++    "/var/lib/containers/storage/vfs-images/dbb63178dc9157068107961f11397df3fb62c02fa64f697d571bf84aad71cb99/manifest",
+     "/var/lib/containers/storage/vfs-images/images.json",
+     "/var/lib/containers/storage/vfs-images/images.lock",
+     "/var/lib/containers/storage/vfs-layers",
+     "/var/lib/containers/storage/vfs-layers/0da97f9fb353a8d6285145bc7a1b75a28652e80f60ab7479bf5b4ae67ffa37e8.tar-split.gz",
++    "/var/lib/containers/storage/vfs-layers/8c42be08e0e5abaacad063054dccf9ce176453c50f14aebc5b335077c79cef77.tar-split.gz",
+     "/var/lib/containers/storage/vfs-layers/layers.json",
+-    "/var/lib/containers/storage/vfs-layers/layers.lock",
+-    "/var/lib/containers/storage/vfs/dir",
+-    "/var/lib/containers/storage/vfs/dir/0da97f9fb353a8d6285145bc7a1b75a28652e80f60ab7479bf5b4ae67ffa37e8",
+-    "/var/lib/containers/storage/vfs/dir/0da97f9fb353a8d6285145bc7a1b75a28652e80f60ab7479bf5b4ae67ffa37e8/hello.txt"],
++    "/var/lib/containers/storage/vfs-layers/layers.lock"
++  ],
+   "differences": {}
+ }
+-- 
+2.40.0
+
