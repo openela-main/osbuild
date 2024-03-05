@@ -9,7 +9,7 @@ Version:              93
 %global         pkgdir %{_prefix}/lib/%{pypi_name}
 
 Name:                 %{pypi_name}
-Release:              1%{?dist}.openela.0.2
+Release:              1%{?dist}.1.openela.0.2
 License:              Apache-2.0
 
 URL:                  %{forgeurl}
@@ -18,6 +18,8 @@ Source0:              %{forgesource}
 BuildArch:            noarch
 Summary:              A build system for OS images
 
+# https://github.com/osbuild/osbuild/commit/dcb0850a2edccd1067385c4a50dd2aab62778009
+Patch0:               stages-org.osbuild.keymap-create-xorg.conf.d-if-it-d.patch
 
 BuildRequires:        make
 BuildRequires:        python3-devel
@@ -266,8 +268,11 @@ fi
 
 
 %changelog
-* Thu Jan 25 2024 Release Engineering <releng@openela.org> - 93.openela.0.2
+* Tue Mar 05 2024 Release Engineering <releng@openela.org> - 93.openela.0.2
 - Add OpenELA runners
+
+* Fri Jan 26 2024 Tomáš Hozza <thozza@redhat.com> - 93-1.1
+- stages/org.osbuild.keymap: create xorg.conf.d if it doesn't exist (RHEL-22840)
 
 * Wed Aug 23 2023 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 93-1
 - New upstream release
