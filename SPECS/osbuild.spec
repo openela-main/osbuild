@@ -1,7 +1,7 @@
 %global         forgeurl https://github.com/osbuild/osbuild
 %global         selinuxtype targeted
 
-Version:              93
+Version:              110
 
 %forgemeta
 
@@ -9,7 +9,7 @@ Version:              93
 %global         pkgdir %{_prefix}/lib/%{pypi_name}
 
 Name:                 %{pypi_name}
-Release:              1%{?dist}.1.openela.0.2
+Release:              1%{?dist}.openela.0.2
 License:              Apache-2.0
 
 URL:                  %{forgeurl}
@@ -18,8 +18,6 @@ Source0:              %{forgesource}
 BuildArch:            noarch
 Summary:              A build system for OS images
 
-# https://github.com/osbuild/osbuild/commit/dcb0850a2edccd1067385c4a50dd2aab62778009
-Patch0:               stages-org.osbuild.keymap-create-xorg.conf.d-if-it-d.patch
 
 BuildRequires:        make
 BuildRequires:        python3-devel
@@ -41,6 +39,12 @@ Requires:             tar
 Requires:             util-linux
 Requires:             python3-%{pypi_name} = %{version}-%{release}
 Requires:             (%{name}-selinux if selinux-policy-%{selinuxtype})
+
+# This is required for `osbuild`, for RHEL-10 and above
+# the stdlib toml package can be used instead
+%if 0%{?rhel} < 10
+Requires:             python3-tomli
+%endif
 
 # Turn off dependency generators for runners. The reason is that runners are
 # tailored to the platform, e.g. on RHEL they are using platform-python. We
@@ -130,6 +134,20 @@ Requires:             python3-typer
 Contains additional tools and utilities for development of
 manifests and osbuild.
 
+%package        depsolve-dnf
+Summary:              Dependency solving support for DNF
+Requires:             %{name} = %{version}-%{release}
+
+# Fedora 40 and later use libdnf5, RHEL and Fedora < 40 use libdnf
+%if 0%{?fedora} >= 40
+Requires:             python3-libdnf5 >= 5.1.1
+%else
+Requires:             python3-libdnf
+%endif
+
+%description    depsolve-dnf
+Contains depsolving capabilities for package managers.
+
 %prep
 %forgeautosetup -p1
 
@@ -150,7 +168,7 @@ bzip2 -9 osbuild.pp
 %py3_install
 
 mkdir -p %{buildroot}%{pkgdir}/stages
-install -p -m 0755 $(find stages -type f) %{buildroot}%{pkgdir}/stages/
+install -p -m 0755 $(find stages -type f -not -name "test_*.py") %{buildroot}%{pkgdir}/stages/
 
 mkdir -p %{buildroot}%{pkgdir}/assemblers
 install -p -m 0755 $(find assemblers -type f) %{buildroot}%{pkgdir}/assemblers/
@@ -196,6 +214,15 @@ install -p -m 0755 data/10-osbuild-inhibitor.rules %{buildroot}%{_udevrulesdir}
 # Remove `osbuild-dev` on non-fedora systems
 %{!?fedora:rm %{buildroot}%{_bindir}/osbuild-dev}
 
+# Install `osbuild-depsolve-dnf` into libexec
+mkdir -p %{buildroot}%{_libexecdir}
+# Fedora 40 and later use dnf5-json, RHEL and Fedora < 40 use dnf-json
+%if 0%{?fedora} >= 40
+install -p -m 0755 tools/osbuild-depsolve-dnf5 %{buildroot}%{_libexecdir}/osbuild-depsolve-dnf
+%else
+install -p -m 0755 tools/osbuild-depsolve-dnf %{buildroot}%{_libexecdir}/osbuild-depsolve-dnf
+%endif
+
 %check
 exit 0
 # We have some integration tests, but those require running a VM, so that would
@@ -221,6 +248,7 @@ exit 0
 %exclude %{pkgdir}/inputs/org.osbuild.ostree*
 %exclude %{pkgdir}/sources/org.osbuild.ostree*
 %exclude %{pkgdir}/stages/org.osbuild.ostree*
+%exclude %{pkgdir}/stages/org.osbuild.experimental.ostree*
 %exclude %{pkgdir}/stages/org.osbuild.rpm-ostree
 
 %files -n       python3-%{pypi_name}
@@ -243,6 +271,7 @@ exit 0
 %{pkgdir}/inputs/org.osbuild.ostree*
 %{pkgdir}/sources/org.osbuild.ostree*
 %{pkgdir}/stages/org.osbuild.ostree*
+%{pkgdir}/stages/org.osbuild.experimental.ostree*
 %{pkgdir}/stages/org.osbuild.rpm-ostree
 
 %files selinux
@@ -266,13 +295,64 @@ fi
 %{_bindir}/osbuild-mpp
 %{?fedora:%{_bindir}/osbuild-dev}
 
+%files depsolve-dnf
+%{_libexecdir}/osbuild-depsolve-dnf
 
 %changelog
-* Tue Mar 05 2024 Release Engineering <releng@openela.org> - 93.openela.0.2
+* Tue Apr 30 2024 Release Engineering <releng@openela.org> - 110.openela.0.2
 - Add OpenELA runners
 
-* Fri Jan 26 2024 Tomáš Hozza <thozza@redhat.com> - 93-1.1
-- stages/org.osbuild.keymap: create xorg.conf.d if it doesn't exist (RHEL-22837)
+* Mon Feb 26 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 110-1
+- New upstream release
+
+* Thu Feb 22 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 109-1
+- New upstream release
+
+* Thu Feb 01 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 106-1
+- New upstream release
+
+* Wed Jan 31 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 105-1
+- New upstream release
+
+* Wed Jan 17 2024 Paweł Poławski <ppolawsk@redhat.com> - 104-2
+- Fix unit tests in RHEL CI by backporting upstream fixes
+
+* Tue Jan 16 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 104-1
+- New upstream release
+
+* Wed Jan 03 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 103-1
+- New upstream release
+
+* Wed Dec 20 2023 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 102-1
+- New upstream release
+
+* Mon Dec 11 2023 Paweł Poławski <ppolawsk@redhat.com> - 101-2
+- Change unit-test timeout from 3h to 4h
+- Rebuild after failed gating
+
+* Wed Dec 06 2023 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 101-1
+- New upstream release
+
+* Fri Nov 24 2023 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 100-1
+- New upstream release
+
+* Wed Nov 08 2023 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 99-1
+- New upstream release
+
+* Wed Oct 25 2023 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 98-1
+- New upstream release
+
+* Wed Oct 11 2023 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 97-1
+- New upstream release
+
+* Wed Sep 27 2023 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 96-1
+- New upstream release
+
+* Wed Sep 13 2023 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 95-1
+- New upstream release
+
+* Wed Aug 30 2023 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 94-1
+- New upstream release
 
 * Wed Aug 23 2023 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 93-1
 - New upstream release
