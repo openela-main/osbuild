@@ -1,7 +1,7 @@
 %global         forgeurl https://github.com/osbuild/osbuild
 %global         selinuxtype targeted
 
-Version:              110
+Version:              126
 
 %forgemeta
 
@@ -138,12 +138,21 @@ manifests and osbuild.
 Summary:              Dependency solving support for DNF
 Requires:             %{name} = %{version}-%{release}
 
-# Fedora 40 and later use libdnf5, RHEL and Fedora < 40 use libdnf
-%if 0%{?fedora} >= 40
-Requires:             python3-libdnf5 >= 5.1.1
+# Fedora 41 and later use libdnf5, RHEL and Fedora < 41 use libdnf
+%if 0%{?fedora} >= 41
+Requires:             python3-libdnf5 >= 5.2.1
 %else
 Requires:             python3-libdnf
 %endif
+
+# osbuild 125 added a new "solver" field and osbuild-composer only
+# supports this since 116
+Conflicts:            osbuild-composer <= 115
+
+# This version needs to get bumped every time the osbuild-dnf-json
+# version changes in an incompatible way. Packages like osbuild-composer
+# can depend on the exact API version this way
+Provides:             osbuild-dnf-json-api = 7
 
 %description    depsolve-dnf
 Contains depsolving capabilities for package managers.
@@ -216,11 +225,15 @@ install -p -m 0755 data/10-osbuild-inhibitor.rules %{buildroot}%{_udevrulesdir}
 
 # Install `osbuild-depsolve-dnf` into libexec
 mkdir -p %{buildroot}%{_libexecdir}
-# Fedora 40 and later use dnf5-json, RHEL and Fedora < 40 use dnf-json
-%if 0%{?fedora} >= 40
-install -p -m 0755 tools/osbuild-depsolve-dnf5 %{buildroot}%{_libexecdir}/osbuild-depsolve-dnf
-%else
 install -p -m 0755 tools/osbuild-depsolve-dnf %{buildroot}%{_libexecdir}/osbuild-depsolve-dnf
+
+# Configure the solver for dnf
+mkdir -p %{buildroot}%{_datadir}/osbuild
+# Fedora 41 and later use dnf5, RHEL and Fedora < 41 use dnf
+%if 0%{?fedora} >= 41
+install -p -m 0644 tools/solver-dnf5.json %{buildroot}%{pkgdir}/solver.json
+%else
+install -p -m 0644 tools/solver-dnf.json %{buildroot}%{pkgdir}/solver.json
 %endif
 
 %check
@@ -297,10 +310,38 @@ fi
 
 %files depsolve-dnf
 %{_libexecdir}/osbuild-depsolve-dnf
+%{pkgdir}/solver.json
 
 %changelog
-* Tue Apr 30 2024 Release Engineering <releng@openela.org> - 110.openela.0.2
+* Tue Nov 12 2024 Release Engineering <releng@openela.org> - 126.openela.0.2
 - Add OpenELA runners
+
+* Wed Aug 21 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 126-1
+- New upstream release
+
+* Wed Aug 14 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 125-1
+- New upstream release
+
+* Thu Aug 01 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 124-1
+- New upstream release
+
+* Thu Jul 25 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 123-1
+- New upstream release
+
+* Tue Jul 23 2024 Tomáš Hozza <thozza@redhat.com> - 122-2
+- Run tests only on x86_64
+
+* Thu Jul 04 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 122-1
+- New upstream release
+
+* Thu May 23 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 119-1
+- New upstream release
+
+* Fri May 10 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 118-1
+- New upstream release
+
+* Wed Feb 28 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 111-1
+- New upstream release
 
 * Mon Feb 26 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 110-1
 - New upstream release
