@@ -1,7 +1,7 @@
 %global         forgeurl https://github.com/osbuild/osbuild
 %global         selinuxtype targeted
 
-Version:              126
+Version:              141
 
 %forgemeta
 
@@ -28,7 +28,6 @@ Requires:             bash
 Requires:             bubblewrap
 Requires:             coreutils
 Requires:             curl
-Requires:             dnf
 Requires:             e2fsprogs
 Requires:             glibc
 Requires:             policycoreutils
@@ -39,6 +38,7 @@ Requires:             tar
 Requires:             util-linux
 Requires:             python3-%{pypi_name} = %{version}-%{release}
 Requires:             (%{name}-selinux if selinux-policy-%{selinuxtype})
+Requires:             python3-librepo
 
 # This is required for `osbuild`, for RHEL-10 and above
 # the stdlib toml package can be used instead
@@ -122,6 +122,7 @@ containers it uses to build OS artifacts.
 Summary:              Extra tools and utilities
 Requires:             %{name} = %{version}-%{release}
 Requires:             python3-pyyaml
+Requires:             python3-dnf
 
 # These are required for `osbuild-dev`, only packaged for Fedora
 %if 0%{?fedora}
@@ -138,11 +139,14 @@ manifests and osbuild.
 Summary:              Dependency solving support for DNF
 Requires:             %{name} = %{version}-%{release}
 
-# Fedora 41 and later use libdnf5, RHEL and Fedora < 41 use libdnf
-%if 0%{?fedora} >= 41
+# RHEL 11 and Fedora 41 and later use libdnf5, RHEL < 11 and Fedora < 41 use dnf
+# On Fedora 41 however, we force dnf4 (and depend on python3-dnf) until dnf5 issues are resolved.
+# See https://github.com/rpm-software-management/dnf5/issues/1748
+# and https://issues.redhat.com/browse/COMPOSER-2361
+%if 0%{?rhel} >= 11
 Requires:             python3-libdnf5 >= 5.2.1
 %else
-Requires:             python3-libdnf
+Requires:             python3-dnf
 %endif
 
 # osbuild 125 added a new "solver" field and osbuild-composer only
@@ -152,7 +156,7 @@ Conflicts:            osbuild-composer <= 115
 # This version needs to get bumped every time the osbuild-dnf-json
 # version changes in an incompatible way. Packages like osbuild-composer
 # can depend on the exact API version this way
-Provides:             osbuild-dnf-json-api = 7
+Provides:             osbuild-dnf-json-api = 8
 
 %description    depsolve-dnf
 Contains depsolving capabilities for package managers.
@@ -229,8 +233,11 @@ install -p -m 0755 tools/osbuild-depsolve-dnf %{buildroot}%{_libexecdir}/osbuild
 
 # Configure the solver for dnf
 mkdir -p %{buildroot}%{_datadir}/osbuild
-# Fedora 41 and later use dnf5, RHEL and Fedora < 41 use dnf
-%if 0%{?fedora} >= 41
+# RHEL 11 and Fedora 41 and later use dnf5, RHEL < 11 and Fedora < 41 use dnf
+# On Fedora 41 however, we force dnf4 (and depend on python3-dnf) until dnf5 issues are resolved.
+# See https://github.com/rpm-software-management/dnf5/issues/1748
+# and https://issues.redhat.com/browse/COMPOSER-2361
+%if 0%{?rhel} >= 11
 install -p -m 0644 tools/solver-dnf5.json %{buildroot}%{pkgdir}/solver.json
 %else
 install -p -m 0644 tools/solver-dnf.json %{buildroot}%{pkgdir}/solver.json
@@ -305,6 +312,7 @@ fi
 %selinux_relabel_post -s %{selinuxtype}
 
 %files tools
+%{_bindir}/osbuild-image-info
 %{_bindir}/osbuild-mpp
 %{?fedora:%{_bindir}/osbuild-dev}
 
@@ -313,8 +321,38 @@ fi
 %{pkgdir}/solver.json
 
 %changelog
-* Tue Nov 12 2024 Release Engineering <releng@openela.org> - 126.openela.0.2
+* Tue May 13 2025 Release Engineering <releng@openela.org> - 141.openela.0.2
 - Add OpenELA runners
+
+* Wed Feb 12 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 141-1
+- New upstream release
+
+* Wed Feb 05 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 140-1
+- New upstream release
+
+* Thu Jan 30 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 139-1
+- New upstream release
+
+* Thu Jan 16 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 138-1
+- New upstream release
+
+* Thu Dec 19 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 137-1
+- New upstream release
+
+* Wed Dec 04 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 136-1
+- New upstream release
+
+* Sat Nov 23 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 135-1
+- New upstream release
+
+* Wed Oct 23 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 132-1
+- New upstream release
+
+* Wed Oct 09 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 131-1
+- New upstream release
+
+* Thu Sep 26 2024 Tomáš Hozza <thozza@redhat.com> - 130-1
+- New upstream release
 
 * Wed Aug 21 2024 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 126-1
 - New upstream release
