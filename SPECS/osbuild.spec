@@ -1,7 +1,7 @@
 %global         forgeurl https://github.com/osbuild/osbuild
 %global         selinuxtype targeted
 
-Version:              141
+Version:              141.2
 
 %forgemeta
 
@@ -321,8 +321,11 @@ fi
 %{pkgdir}/solver.json
 
 %changelog
-* Tue May 13 2025 Release Engineering <releng@openela.org> - 141.openela.0.2
+* Tue May 13 2025 Release Engineering <releng@openela.org> - 141.2.openela.0.2
 - Add OpenELA runners
+
+* Wed Apr 02 2025 Tomáš Hozza <thozza@redhat.com> - 141.2-1
+- Resolve RHEL-85560
 
 * Wed Feb 12 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 141-1
 - New upstream release
