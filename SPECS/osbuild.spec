@@ -1,7 +1,7 @@
 %global         forgeurl https://github.com/osbuild/osbuild
 %global         selinuxtype targeted
 
-Version:              141.2
+Version:              158
 
 %forgemeta
 
@@ -41,8 +41,8 @@ Requires:             (%{name}-selinux if selinux-policy-%{selinuxtype})
 Requires:             python3-librepo
 
 # This is required for `osbuild`, for RHEL-10 and above
-# the stdlib toml package can be used instead
-%if 0%{?rhel} < 10
+# the stdlib tomllib module can be used instead
+%if 0%{?rhel} && 0%{?rhel} < 10
 Requires:             python3-tomli
 %endif
 
@@ -128,7 +128,11 @@ Requires:             python3-dnf
 %if 0%{?fedora}
 Requires:             python3-rich
 Requires:             python3-attrs
+%if 0%{?fedora} > 40
+Requires:             python3dist(typer-slim[standard])
+%else
 Requires:             python3-typer
+%endif
 %endif
 
 %description    tools
@@ -147,6 +151,13 @@ Requires:             %{name} = %{version}-%{release}
 Requires:             python3-libdnf5 >= 5.2.1
 %else
 Requires:             python3-dnf
+%endif
+
+%if 0%{?fedora}
+# RHEL / CS does not have python3-license-expression
+# It is needed for validating license expressions in RPM packages when generating SBOMs
+# While SBOMs can be generated also without this package, it is recommended to have it.
+Recommends:           python3-license-expression
 %endif
 
 # osbuild 125 added a new "solver" field and osbuild-composer only
@@ -321,11 +332,38 @@ fi
 %{pkgdir}/solver.json
 
 %changelog
-* Tue May 13 2025 Release Engineering <releng@openela.org> - 141.2.openela.0.2
+* Tue Nov 11 2025 Release Engineering <releng@openela.org> - 158.openela.0.2
 - Add OpenELA runners
 
-* Wed Apr 02 2025 Tomáš Hozza <thozza@redhat.com> - 141.2-1
-- Resolve RHEL-85560
+* Thu Aug 14 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 158-1
+- New upstream release
+
+* Tue Jul 15 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 156-1
+- New upstream release
+
+* Sat Jul 12 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 155-1
+- New upstream release
+
+* Fri Jun 20 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 153-1
+- New upstream release
+
+* Fri Jun 06 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 151-1
+- New upstream release
+
+* Mon May 19 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 149-1
+- New upstream release
+
+* Wed Apr 16 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 147-1
+- New upstream release
+
+* Mon Apr 14 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 146-1
+- New upstream release
+
+* Fri Mar 28 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 144-1
+- New upstream release
+
+* Fri Feb 28 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 142-1
+- New upstream release
 
 * Wed Feb 12 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 141-1
 - New upstream release
