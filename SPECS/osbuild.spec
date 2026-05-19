@@ -1,12 +1,14 @@
 %global         forgeurl https://github.com/osbuild/osbuild
 %global         selinuxtype targeted
 
-Version:              158
+Version:              174
+%global         osbuild_initrd_version 0.1
 
 %forgemeta
 
 %global         pypi_name osbuild
 %global         pkgdir %{_prefix}/lib/%{pypi_name}
+%global         debug_package %{nil}
 
 Name:                 %{pypi_name}
 Release:              1%{?dist}.openela.0.2
@@ -15,14 +17,33 @@ License:              Apache-2.0
 URL:                  %{forgeurl}
 
 Source0:              %{forgesource}
-BuildArch:            noarch
+Source1:              https://github.com/osbuild/initrd/releases/download/%{osbuild_initrd_version}/osbuild-initrd-%{osbuild_initrd_version}.tar.gz
 Summary:              A build system for OS images
 
+
+# There is no golang support for i686 on centos and RHEL
+%if 0%{?rhel} || 0%{?centos}
+ExcludeArch:          i686
+%endif
 
 BuildRequires:        make
 BuildRequires:        python3-devel
 BuildRequires:        python3-docutils
+BuildRequires:        python3-setuptools
 BuildRequires:        systemd
+
+# for tests
+BuildRequires:        python3-iniparse
+BuildRequires:        python3-jsonschema
+BuildRequires:        python3-kickstart
+BuildRequires:        python3-mako
+BuildRequires:        python3-PyYAML
+BuildRequires:        python3-pytest
+%if 0%{?fedora}
+BuildRequires:        python3-license-expression
+BuildRequires:        python3-pytest-xdist
+BuildRequires:        python3-tomli-w
+%endif
 
 Requires:             bash
 Requires:             bubblewrap
@@ -39,6 +60,7 @@ Requires:             util-linux
 Requires:             python3-%{pypi_name} = %{version}-%{release}
 Requires:             (%{name}-selinux if selinux-policy-%{selinuxtype})
 Requires:             python3-librepo
+Requires:             %{name}-initrd = %{version}-%{release}
 
 # This is required for `osbuild`, for RHEL-10 and above
 # the stdlib tomllib module can be used instead
@@ -105,6 +127,13 @@ Requires:             rpm-ostree
 Contains the necessary stages, assembler and source
 to build OSTree based images.
 
+%package        initrd
+Summary:              osbuild initrd for vm support
+BuildRequires:        %{?go_compiler:compiler(go-compiler)}%{!?go_compiler:golang}
+
+%description    initrd
+Osbuild initrd used for in-vm support.
+
 %package        selinux
 Summary:              SELinux policies
 Requires:             %{name} = %{version}-%{release}
@@ -118,6 +147,20 @@ Contains the necessary SELinux policies that allows
 osbuild to use labels unknown to the host inside the
 containers it uses to build OS artifacts.
 
+%package        container-selinux
+Summary:              SELinux container policies
+Requires:             selinux-policy-%{selinuxtype}
+Requires:             container-selinux
+Requires(post): selinux-policy-%{selinuxtype}
+Requires(post): container-selinux
+BuildRequires:        selinux-policy-devel
+BuildRequires:        selinux-policy-devel
+%{?selinux_requires}
+
+%description    container-selinux
+Contains the necessary SELinux policies that allows
+running osbuild in a container.
+
 %package        tools
 Summary:              Extra tools and utilities
 Requires:             %{name} = %{version}-%{release}
@@ -128,11 +171,7 @@ Requires:             python3-dnf
 %if 0%{?fedora}
 Requires:             python3-rich
 Requires:             python3-attrs
-%if 0%{?fedora} > 40
-Requires:             python3dist(typer-slim[standard])
-%else
 Requires:             python3-typer
-%endif
 %endif
 
 %description    tools
@@ -164,9 +203,7 @@ Recommends:           python3-license-expression
 # supports this since 116
 Conflicts:            osbuild-composer <= 115
 
-# This version needs to get bumped every time the osbuild-dnf-json
-# version changes in an incompatible way. Packages like osbuild-composer
-# can depend on the exact API version this way
+# XXX: remove this once the osbuild-dnf-json V1 API is removed (osbuild/solver/api/v1.py)
 Provides:             osbuild-dnf-json-api = 8
 
 %description    depsolve-dnf
@@ -174,22 +211,31 @@ Contains depsolving capabilities for package managers.
 
 %prep
 %forgeautosetup -p1
+tar xf %SOURCE1
 
 ln -rs %{_builddir}/%{name}-%{version}/runners/org.osbuild.rhel82 %{_builddir}/%{name}-%{version}/runners/org.osbuild.openela8
 ln -rs %{_builddir}/%{name}-%{version}/runners/org.osbuild.centos9 %{_builddir}/%{name}-%{version}/runners/org.osbuild.openela9
 %build
 %py3_build
 make man
+(cd osbuild-initrd-%{osbuild_initrd_version}; make build)
 
 # SELinux
 make -f /usr/share/selinux/devel/Makefile osbuild.pp
 bzip2 -9 osbuild.pp
+
+make -f /usr/share/selinux/devel/Makefile osbuild-container.pp
+bzip2 -9 osbuild-container.pp
 
 %pre selinux
 %selinux_relabel_pre -s %{selinuxtype}
 
 %install
 %py3_install
+(cd osbuild-initrd-%{osbuild_initrd_version}; %make_install)
+
+# Ensure vm.py is executable which is needed to run in with init= in the vm
+chmod 0755 %{buildroot}%{python3_sitelib}/%{pypi_name}/vm.py
 
 mkdir -p %{buildroot}%{pkgdir}/stages
 install -p -m 0755 $(find stages -type f -not -name "test_*.py") %{buildroot}%{pkgdir}/stages/
@@ -228,6 +274,7 @@ install -p -m 0644 -t %{buildroot}%{_mandir}/man5/ docs/*.5
 
 # SELinux
 install -D -m 0644 -t %{buildroot}%{_datadir}/selinux/packages/%{selinuxtype} %{name}.pp.bz2
+install -D -m 0644 -t %{buildroot}%{_datadir}/selinux/packages/%{selinuxtype} %{name}-container.pp.bz2
 install -D -m 0644 -t %{buildroot}%{_mandir}/man8 selinux/%{name}_selinux.8
 install -D -p -m 0644 selinux/osbuild.if %{buildroot}%{_datadir}/selinux/devel/include/distributed/%{name}.if
 
@@ -254,10 +301,90 @@ install -p -m 0644 tools/solver-dnf5.json %{buildroot}%{pkgdir}/solver.json
 install -p -m 0644 tools/solver-dnf.json %{buildroot}%{pkgdir}/solver.json
 %endif
 
+%if 0%{?fedora} || 0%{?rhel} >= 9
 %check
-exit 0
-# We have some integration tests, but those require running a VM, so that would
-# be an overkill for RPM check script.
+# skip toml-writing tests in RHEL (no such library available there)
+# There is a bunch of tests failing on specific arch/OS combinations.
+# osbuild is a noarch package, meaning the architecture conditionals don't work.
+# The details of the failing tests are described in the comments.
+# Since we can't be granular enough, skip tests based on the OS only.
+# This means some tests won't be run even though they could,
+# but that's an acceptable tradeoff.
+ignore_files=()
+skip_tests=()
+
+# x86_64-specific tests:
+# test/mod/test_util_sbom_spdx.py
+# test/mod/test_util_sbom_dnf.py
+# test/mod/test_testutil_dnf4.py
+# test/mod/test_solver_implementations.py
+%ifnarch x86_64
+ignore_files+=(
+    test/mod/test_util_sbom_spdx.py
+    test/mod/test_util_sbom_dnf.py
+    test/mod/test_testutil_dnf4.py
+    test/mod/test_solver_implementations.py
+)
+%endif
+
+# fails on s390x:
+# test_ioctl_toggle_immutable
+# test_rmtree_immutable
+%ifarch s390x
+skip_tests+=(
+    test_ioctl_toggle_immutable
+    test_rmtree_immutable
+)
+%endif
+
+# fails on ppc64le:
+# TestAPI.test_exception - https://github.com/osbuild/osbuild/issues/2337
+# TestUtilJsonComm.test_send_and_recv_tons_of_data_is_fine - https://github.com/osbuild/osbuild/issues/2336
+# TestUtilJsonComm.test_sendmsg_errors_with_size_on_EMSGSIZE - https://github.com/osbuild/osbuild/issues/2342
+%ifarch ppc64le
+skip_tests+=(
+    "(TestAPI and test_exception)"
+    "(TestUtilJsonComm and test_send_and_recv_tons_of_data_is_fine)"
+    "(TestUtilJsonComm and test_sendmsg_errors_with_size_on_EMSGSIZE)"
+)
+%endif
+
+# fails on ppc64le and aarch64:
+# test_cache_full_behavior
+%ifarch ppc64le || aarch64
+skip_tests+=(
+    test_cache_full_behavior
+)
+%endif
+
+# fails on C9S and EPEL9:
+# tools/test/test_depsolve.py
+# test_dnf4_pkg_to_package - https://github.com/osbuild/osbuild/issues/2339
+%if 0%{?rhel} && 0%{?rhel} < 10
+ignore_files+=(
+    tools/test/test_depsolve.py
+)
+skip_tests+=(
+    test_dnf4_pkg_to_package
+)
+%endif
+
+ignore_args=()
+for file in "${ignore_files[@]}"; do
+    ignore_args+=(--ignore "$file")
+done
+
+skip_test_expr=""
+for test in "${skip_tests[@]}"; do
+    if [ "$skip_test_expr" != "" ]; then
+        skip_test_expr+=" and not $test"
+    else
+        skip_test_expr+="not $test"
+    fi
+done
+
+%pytest %{?fedora:-n auto} -v %{?rhel:-m "not tomlwrite"} ${ignore_args[@]} -k "${skip_test_expr}"
+%endif
 
 %files
 %license LICENSE
@@ -266,6 +393,7 @@ exit 0
 %{_mandir}/man5/%{name}-manifest.5*
 %{_datadir}/osbuild/schemas
 %{pkgdir}
+%exclude %{pkgdir}/initrd
 %{_udevrulesdir}/*.rules
 # the following files are in the lvm2 sub-package
 %exclude %{pkgdir}/devices/org.osbuild.lvm2*
@@ -287,6 +415,9 @@ exit 0
 %doc README.md
 %{python3_sitelib}/%{pypi_name}-*.egg-info/
 %{python3_sitelib}/%{pypi_name}/
+
+%files initrd
+%{pkgdir}/initrd
 
 %files lvm2
 %{pkgdir}/devices/org.osbuild.lvm2*
@@ -322,6 +453,18 @@ fi
 %posttrans selinux
 %selinux_relabel_post -s %{selinuxtype}
 
+%files container-selinux
+%{_datadir}/selinux/packages/%{selinuxtype}/%{name}-container.pp.bz2
+%ghost %verify(not md5 size mode mtime) %{_sharedstatedir}/selinux/%{selinuxtype}/active/modules/200/%{name}-container
+
+%post container-selinux
+%selinux_modules_install -s %{selinuxtype} %{_datadir}/selinux/packages/%{selinuxtype}/%{name}-container.pp.bz2
+
+%postun container-selinux
+if [ $1 -eq 0 ]; then
+    %selinux_modules_uninstall -s %{selinuxtype} %{name}-container
+fi
+
 %files tools
 %{_bindir}/osbuild-image-info
 %{_bindir}/osbuild-mpp
@@ -332,8 +475,26 @@ fi
 %{pkgdir}/solver.json
 
 %changelog
-* Tue Nov 11 2025 Release Engineering <releng@openela.org> - 158.openela.0.2
+* Tue May 19 2026 Release Engineering <releng@openela.org> - 174.openela.0.2
 - Add OpenELA runners
+
+* Thu Feb 19 2026 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 174-1
+- New upstream release
+
+* Thu Feb 12 2026 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 173-1
+- New upstream release
+
+* Fri Feb 06 2026 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 172-1
+- New upstream release
+
+* Wed Nov 05 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 164-1
+- New upstream release
+
+* Thu Oct 23 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 163-1
+- New upstream release
+
+* Thu Oct 09 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 162-1
+- New upstream release
 
 * Thu Aug 14 2025 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 158-1
 - New upstream release
