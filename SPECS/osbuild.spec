@@ -1,8 +1,8 @@
 %global         forgeurl https://github.com/osbuild/osbuild
 %global         selinuxtype targeted
 
-Version:              174
-%global         osbuild_initrd_version 0.1
+Version:              191
+%global         osbuild_initrd_version 0.2
 
 %forgemeta
 
@@ -137,8 +137,8 @@ Osbuild initrd used for in-vm support.
 %package        selinux
 Summary:              SELinux policies
 Requires:             %{name} = %{version}-%{release}
-Requires:             selinux-policy-%{selinuxtype}
-Requires(post): selinux-policy-%{selinuxtype}
+Requires:             selinux-policy-%{selinuxtype} >= %{_selinux_policy_version}
+Requires(post): selinux-policy-%{selinuxtype} >= %{_selinux_policy_version}
 BuildRequires:        selinux-policy-devel
 %{?selinux_requires}
 
@@ -149,9 +149,9 @@ containers it uses to build OS artifacts.
 
 %package        container-selinux
 Summary:              SELinux container policies
-Requires:             selinux-policy-%{selinuxtype}
+Requires:             selinux-policy-%{selinuxtype} >= %{_selinux_policy_version}
 Requires:             container-selinux
-Requires(post): selinux-policy-%{selinuxtype}
+Requires(post): selinux-policy-%{selinuxtype} >= %{_selinux_policy_version}
 Requires(post): container-selinux
 BuildRequires:        selinux-policy-devel
 BuildRequires:        selinux-policy-devel
@@ -182,11 +182,8 @@ manifests and osbuild.
 Summary:              Dependency solving support for DNF
 Requires:             %{name} = %{version}-%{release}
 
-# RHEL 11 and Fedora 41 and later use libdnf5, RHEL < 11 and Fedora < 41 use dnf
-# On Fedora 41 however, we force dnf4 (and depend on python3-dnf) until dnf5 issues are resolved.
-# See https://github.com/rpm-software-management/dnf5/issues/1748
-# and https://issues.redhat.com/browse/COMPOSER-2361
-%if 0%{?rhel} >= 11
+# Default to using DNF5 solver for RHEL 11 and Fedora 45 and later
+%if 0%{?rhel} >= 11 || 0%{?fedora} >= 45
 Requires:             python3-libdnf5 >= 5.2.1
 %else
 Requires:             python3-dnf
@@ -208,6 +205,17 @@ Provides:             osbuild-dnf-json-api = 8
 
 %description    depsolve-dnf
 Contains depsolving capabilities for package managers.
+
+%if ! (0%{?rhel} && "%{_arch}" == "ppc64le")
+%package        virt-deps
+Summary:              Dependencies required for running osbuild pipelines in a VM.
+Requires:             %{name} = %{version}-%{release}
+Requires:             qemu-kvm
+Requires:             virtiofsd
+
+%description    virt-deps
+Dependencies required for running osbuild pipelines in a VM.
+%endif
 
 %prep
 %forgeautosetup -p1
@@ -289,13 +297,13 @@ install -p -m 0755 data/10-osbuild-inhibitor.rules %{buildroot}%{_udevrulesdir}
 mkdir -p %{buildroot}%{_libexecdir}
 install -p -m 0755 tools/osbuild-depsolve-dnf %{buildroot}%{_libexecdir}/osbuild-depsolve-dnf
 
+# Install `osbuild-store` into libexec
+install -p -m 0755 tools/osbuild-store %{buildroot}%{_libexecdir}/osbuild-store
+
 # Configure the solver for dnf
 mkdir -p %{buildroot}%{_datadir}/osbuild
-# RHEL 11 and Fedora 41 and later use dnf5, RHEL < 11 and Fedora < 41 use dnf
-# On Fedora 41 however, we force dnf4 (and depend on python3-dnf) until dnf5 issues are resolved.
-# See https://github.com/rpm-software-management/dnf5/issues/1748
-# and https://issues.redhat.com/browse/COMPOSER-2361
-%if 0%{?rhel} >= 11
+# Default to using DNF5 solver for RHEL 11 and Fedora 45 and later
+%if 0%{?rhel} >= 11 || 0%{?fedora} >= 45
 install -p -m 0644 tools/solver-dnf5.json %{buildroot}%{pkgdir}/solver.json
 %else
 install -p -m 0644 tools/solver-dnf.json %{buildroot}%{pkgdir}/solver.json
@@ -311,7 +319,12 @@ install -p -m 0644 tools/solver-dnf.json %{buildroot}%{pkgdir}/solver.json
 # This means some tests won't be run even though they could,
 # but that's an acceptable tradeoff.
 ignore_files=()
-skip_tests=()
+
+# Fails very regularly downstream recently
+# TestUtilJsonComm.test_send_and_recv_tons_of_data_is_fine - https://github.com/osbuild/osbuild/issues/2336
+skip_tests=(
+    "(TestUtilJsonComm and test_send_and_recv_tons_of_data_is_fine)"
+)
 
 # x86_64-specific tests:
 # test/mod/test_util_sbom_spdx.py
@@ -339,12 +352,10 @@ skip_tests+=(
 
 # fails on ppc64le:
 # TestAPI.test_exception - https://github.com/osbuild/osbuild/issues/2337
-# TestUtilJsonComm.test_send_and_recv_tons_of_data_is_fine - https://github.com/osbuild/osbuild/issues/2336
 # TestUtilJsonComm.test_sendmsg_errors_with_size_on_EMSGSIZE - https://github.com/osbuild/osbuild/issues/2342
 %ifarch ppc64le
 skip_tests+=(
     "(TestAPI and test_exception)"
-    "(TestUtilJsonComm and test_send_and_recv_tons_of_data_is_fine)"
     "(TestUtilJsonComm and test_sendmsg_errors_with_size_on_EMSGSIZE)"
 )
 %endif
@@ -469,14 +480,34 @@ fi
 %{_bindir}/osbuild-image-info
 %{_bindir}/osbuild-mpp
 %{?fedora:%{_bindir}/osbuild-dev}
+%{_libexecdir}/osbuild-store
 
 %files depsolve-dnf
 %{_libexecdir}/osbuild-depsolve-dnf
 %{pkgdir}/solver.json
 
+%if ! (0%{?rhel} && "%{_arch}" == "ppc64le")
+%files virt-deps
+%endif
+
 %changelog
-* Tue May 19 2026 Release Engineering <releng@openela.org> - 174.openela.0.2
+* Tue Nov 10 2026 Release Engineering <releng@openela.org> - 191.openela.0.2
 - Add OpenELA runners
+
+* Sun Aug 23 2026 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 191-1
+- New upstream release
+
+* Wed Aug 12 2026 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 190-1
+- New upstream release
+
+* Thu Jul 30 2026 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 189-1
+- New upstream release
+
+* Mon Jul 13 2026 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 187-1
+- New upstream release
+
+* Wed May 27 2026 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 183-1
+- New upstream release
 
 * Thu Feb 19 2026 imagebuilder-bot <imagebuilder-bots+imagebuilder-bot@redhat.com> - 174-1
 - New upstream release
